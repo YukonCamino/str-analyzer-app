@@ -1,0 +1,30 @@
+@import "tailwindcss";
+
+:root {
+  --bg-0: #0f172a;
+  --bg-1: #1e293b;
+  --bg-2: #0f1e33;
+  --text-1: #f1f5f9;
+  --text-2: #94a3b8;
+  --border: rgba(148,163,184,0.15);
+  --green: #22c55e;
+  --red: #ef4444;
+  --yellow: #fbbf24;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--bg-0);
+  color: var(--text-1);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+
+/* Number inputs — remove spinners */
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; }

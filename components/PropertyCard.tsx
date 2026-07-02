@@ -181,7 +181,7 @@ export default function PropertyCard({ property: p, onDelete, onUpdate }: Props)
             </a>
           )}
           {p.airbnb_link && p.airbnb_link.startsWith('http') && (
-            <a href={p.airbnb_link} target="_blank" rel="noopener noreferrer" style={LINK_BTN_STYLE('#9f1239')}>
+            <a href={p.airbnb_link} target="_blank" rel="noopener noreferrer" style={LINK_BTN_STYLE('#e02240')}>
               📍 AirBnB
             </a>
           )}

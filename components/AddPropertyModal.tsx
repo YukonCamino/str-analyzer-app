@@ -1,6 +1,6 @@
 'use client'
 import { useState } from 'react'
-import { Property, estimatePITI, estimateDown } from '@/lib/calculations'
+import { Property, estimatePITI, estimateDown, compute, fmtMoney } from '@/lib/calculations'
 
 interface Props {
   onClose: () => void
@@ -22,6 +22,85 @@ export default function AddPropertyModal({ onClose, onAdd }: Props) {
   const [form, setForm] = useState<Partial<Property>>(BLANK)
   const [saving, setSaving] = useState(false)
 
+  // Comp-based revenue estimation state
+  const [compStatus, setCompStatus] = useState<'idle' | 'loading' | 'done' | 'failed'>('idle')
+  const [compInfo, setCompInfo] = useState<{
+    annual_rev: number; confidence: string; method: string
+    comp_count: number; adr: number; occupancy: number
+  } | null>(null)
+  const [needAirroi, setNeedAirroi] = useState(false)
+  const [airroiPcts, setAirroiPcts] = useState<Record<string, number> | null>(null)
+  const [airroiFetching, setAirroiFetching] = useState(false)
+
+  /** Try to estimate revenue from AirROI comps (beds/pool-matched). Falls back to screenshot. */
+  const estimateRevenue = async (d: Partial<Property>) => {
+    if (!d.address || !d.beds) { setNeedAirroi(true); setCompStatus('failed'); return }
+    setCompStatus('loading')
+    try {
+      const res = await fetch('/api/estimate-revenue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          address: d.address, beds: d.beds, baths: d.baths,
+          has_pool: d.has_pool ?? false,
+        }),
+      })
+      const data = await res.json()
+      if (data.available && data.confidence !== 'low') {
+        setCompInfo(data)
+        setCompStatus('done')
+        setNeedAirroi(false)
+        setForm(prev => ({
+          ...prev,
+          annual_rev: data.annual_rev,
+          rev_source: `AirROI comps (${data.comp_count} matched, ${data.confidence})`,
+        }))
+      } else {
+        // Low confidence or unavailable → ask for AirROI screenshot
+        if (data.available) setCompInfo(data)
+        setCompStatus('failed')
+        setNeedAirroi(true)
+      }
+    } catch {
+      setCompStatus('failed')
+      setNeedAirroi(true)
+    }
+  }
+
+  /** Extract revenue data from an AirROI screenshot (fallback path) */
+  const extractAirroiScreenshot = async (file: File) => {
+    setAirroiFetching(true)
+    try {
+      const fd = new FormData()
+      fd.append('image', file)
+      fd.append('source', 'airroi')
+      const res = await fetch('/api/extract-from-image', { method: 'POST', body: fd })
+      const data = await res.json()
+      if (data.error) { setFetchMsg(`Could not read AirROI screenshot: ${data.error}`); return }
+      const pcts: Record<string, number> = {}
+      if (data.rev_p25) pcts['25th'] = data.rev_p25
+      if (data.rev_p50) pcts['50th'] = data.rev_p50
+      if (data.rev_p75) pcts['75th'] = data.rev_p75
+      if (data.rev_p90) pcts['90th'] = data.rev_p90
+      setAirroiPcts(Object.keys(pcts).length > 1 ? pcts : null)
+      if (data.annual_rev) {
+        setForm(prev => ({ ...prev, annual_rev: data.annual_rev, rev_source: 'AirROI screenshot' }))
+        setFetchMsg(
+          `Revenue extracted from AirROI screenshot` +
+          (data.adr ? ` — ADR $${data.adr}` : '') +
+          (data.occupancy ? `, ${data.occupancy}% occupancy` : '')
+        )
+        setNeedAirroi(false)
+      } else {
+        setFetchMsg('Could not find a revenue figure in that screenshot — enter it manually.')
+      }
+    } catch {
+      setFetchMsg("Couldn't read the AirROI screenshot — enter revenue manually.")
+    } finally {
+      setAirroiFetching(false)
+    }
+  }
+
   const fetchZillow = async () => {
     if (!zillowUrl.includes('zillow.com')) { setFetchMsg('Paste a Zillow listing URL'); return }
     setFetching(true); setFetchMsg('')
@@ -32,21 +111,23 @@ export default function AddPropertyModal({ onClose, onAdd }: Props) {
         body: JSON.stringify({ url: zillowUrl }),
       })
       const data = await res.json()
-      setForm(prev => ({
-        ...prev,
-        address: data.address ?? prev.address,
-        price: data.price ?? prev.price,
-        beds: data.beds ?? prev.beds,
-        baths: data.baths ?? prev.baths,
-        sqft: data.sqft ?? prev.sqft,
-        dom: data.dom ?? prev.dom,
-        img_url: data.img_url ?? prev.img_url,
+      const merged: Partial<Property> = {
+        ...form,
+        address: data.address ?? form.address,
+        price: data.price ?? form.price,
+        beds: data.beds ?? form.beds,
+        baths: data.baths ?? form.baths,
+        sqft: data.sqft ?? form.sqft,
+        dom: data.dom ?? form.dom,
+        img_url: data.img_url ?? form.img_url,
         zillow_link: zillowUrl,
-      }))
+      }
+      setForm(merged)
       if (data.blocked) {
         setFetchMsg("Zillow blocked the request — fill in the details manually below.")
       } else {
         setFetchMsg('Pulled from Zillow! Check the fields below.')
+        estimateRevenue(merged)
       }
     } catch {
       setFetchMsg("Couldn't reach Zillow — fill in manually.")
@@ -62,6 +143,7 @@ export default function AddPropertyModal({ onClose, onAdd }: Props) {
     try {
       const fd = new FormData()
       fd.append('image', file)
+      fd.append('source', 'zillow')
       const res = await fetch('/api/extract-from-image', { method: 'POST', body: fd })
       const data = await res.json()
       if (data.error) {
@@ -69,17 +151,19 @@ export default function AddPropertyModal({ onClose, onAdd }: Props) {
         setStep('form')
         return
       }
-      setForm(prev => ({
-        ...prev,
-        address: data.address ?? prev.address,
-        price: data.price ?? prev.price,
-        beds: data.beds ?? prev.beds,
-        baths: data.baths ?? prev.baths,
-        sqft: data.sqft ?? prev.sqft,
-        dom: data.dom ?? prev.dom,
-        annual_rev: data.annual_rev ?? prev.annual_rev,
-      }))
+      const merged: Partial<Property> = {
+        ...form,
+        address: data.address ?? form.address,
+        price: data.price ?? form.price,
+        beds: data.beds ?? form.beds,
+        baths: data.baths ?? form.baths,
+        sqft: data.sqft ?? form.sqft,
+        dom: data.dom ?? form.dom,
+        has_pool: data.has_pool ?? form.has_pool,
+      }
+      setForm(merged)
       setFetchMsg('Extracted from screenshot! Review the fields below.')
+      estimateRevenue(merged)
     } catch {
       setFetchMsg("Couldn't read the screenshot — fill in manually.")
     } finally {
@@ -241,9 +325,75 @@ export default function AddPropertyModal({ onClose, onAdd }: Props) {
                 </Field>
               </div>
 
-              <Field label="Annual Revenue (AirROI estimate or manual)">
-                <input style={INPUT_STYLE} type="number" value={form.annual_rev ?? ''} onChange={e => set('annual_rev', +e.target.value)} placeholder="0" />
+              {/* Comp-based revenue status */}
+              {compStatus === 'loading' && (
+                <div style={{ background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.3)', borderRadius: 8, padding: '8px 12px', fontSize: '0.78rem', color: '#93c5fd' }}>
+                  Looking up AirROI comps for this property…
+                </div>
+              )}
+              {compStatus === 'done' && compInfo && (
+                <div style={{ background: 'rgba(34,197,94,0.12)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: 8, padding: '8px 12px', fontSize: '0.78rem', color: '#86efac' }}>
+                  Revenue estimated from comps: <b>${compInfo.annual_rev.toLocaleString()}</b>/yr
+                  ({compInfo.method}) — ADR ${compInfo.adr}, {compInfo.occupancy}% occupancy.
+                  Adjust below if needed.
+                </div>
+              )}
+              {needAirroi && (
+                <div style={{ border: '1px solid rgba(251,191,36,0.35)', borderRadius: 10, padding: 12, background: 'rgba(251,191,36,0.07)' }}>
+                  <div style={{ fontSize: '0.78rem', color: '#fcd34d', marginBottom: 8 }}>
+                    Couldn&apos;t find a confident comp match automatically. Upload an AirROI
+                    screenshot for this address and revenue will be extracted from it.
+                  </div>
+                  <label style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                    border: '2px dashed rgba(251,191,36,0.35)', borderRadius: 10,
+                    padding: '14px 12px', cursor: airroiFetching ? 'not-allowed' : 'pointer',
+                    color: '#94a3b8', fontSize: '0.8rem',
+                  }}>
+                    {airroiFetching ? (
+                      <span style={{ color: '#fcd34d' }}>Reading AirROI screenshot…</span>
+                    ) : (
+                      <span>📷 Upload AirROI screenshot</span>
+                    )}
+                    <input
+                      type="file" accept="image/*" disabled={airroiFetching}
+                      style={{ display: 'none' }}
+                      onChange={e => {
+                        const file = e.target.files?.[0]
+                        if (file) extractAirroiScreenshot(file)
+                      }}
+                    />
+                  </label>
+                </div>
+              )}
+
+              <Field label="Annual Revenue (auto from comps, AirROI screenshot, or manual)">
+                <input style={INPUT_STYLE} type="number" value={form.annual_rev ?? ''} onChange={e => { set('annual_rev', +e.target.value); set('rev_source', 'manual') }} placeholder="0" />
               </Field>
+
+              {airroiPcts && (
+                <div>
+                  <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: 6 }}>
+                    AirROI scenarios — tap to use:
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {Object.entries(airroiPcts).map(([pct, val]) => (
+                      <button
+                        key={pct}
+                        onClick={() => setForm(prev => ({ ...prev, annual_rev: val, rev_source: `AirROI ${pct} pct` }))}
+                        style={{
+                          background: form.annual_rev === val ? '#1d4ed8' : '#0f172a',
+                          color: form.annual_rev === val ? '#fff' : '#94a3b8',
+                          border: '1px solid rgba(148,163,184,0.25)', borderRadius: 20,
+                          padding: '5px 12px', fontSize: '0.75rem', cursor: 'pointer',
+                        }}
+                      >
+                        {pct}: ${val.toLocaleString()}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <Field label="Monthly PITI (auto-estimated if blank)">
@@ -289,6 +439,39 @@ export default function AddPropertyModal({ onClose, onAdd }: Props) {
                   Already sold
                 </label>
               </div>
+              {/* Live ROI preview */}
+              {(() => {
+                if (!form.price || !form.annual_rev || !form.sqft) return null
+                const piti = form.piti || estimatePITI(form.price)
+                const down = form.down_payment || estimateDown(form.price)
+                const f = compute(form.price, form.annual_rev, piti, down, form.sqft, form.has_pool ?? false)
+                if (f.no_rev || f.cf === null || f.coc === null) return null
+                const good = f.coc >= 10
+                return (
+                  <div style={{
+                    border: `1px solid ${good ? 'rgba(34,197,94,0.35)' : 'rgba(148,163,184,0.25)'}`,
+                    borderRadius: 10, padding: 12, background: 'rgba(15,23,42,0.5)',
+                  }}>
+                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: 8, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                      ROI Preview
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, fontSize: '0.8rem' }}>
+                      <div>
+                        <div style={{ color: '#64748b', fontSize: '0.68rem' }}>Cash-on-Cash</div>
+                        <div style={{ color: good ? '#4ade80' : '#f1f5f9', fontWeight: 700 }}>{f.coc.toFixed(1)}%</div>
+                      </div>
+                      <div>
+                        <div style={{ color: '#64748b', fontSize: '0.68rem' }}>Monthly Cash Flow</div>
+                        <div style={{ color: f.cf >= 0 ? '#4ade80' : '#f87171', fontWeight: 700 }}>{fmtMoney(f.cf)}</div>
+                      </div>
+                      <div>
+                        <div style={{ color: '#64748b', fontSize: '0.68rem' }}>Cash to Start</div>
+                        <div style={{ color: '#f1f5f9', fontWeight: 700 }}>${Math.round(f.startup).toLocaleString()}</div>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })()}
             </div>
 
             <div style={{ display: 'flex', gap: 10, marginTop: 18 }}>

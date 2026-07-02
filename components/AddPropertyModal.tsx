@@ -15,6 +15,7 @@ const BLANK: Partial<Property> = {
 
 export default function AddPropertyModal({ onClose, onAdd }: Props) {
   const [step, setStep] = useState<'url' | 'form'>('url')
+  const [inputMode, setInputMode] = useState<'zillow' | 'screenshot'>('zillow')
   const [zillowUrl, setZillowUrl] = useState('')
   const [fetching, setFetching] = useState(false)
   const [fetchMsg, setFetchMsg] = useState('')
@@ -49,6 +50,38 @@ export default function AddPropertyModal({ onClose, onAdd }: Props) {
       }
     } catch {
       setFetchMsg("Couldn't reach Zillow — fill in manually.")
+    } finally {
+      setFetching(false)
+      setStep('form')
+    }
+  }
+
+  const extractFromScreenshot = async (file: File) => {
+    setFetching(true)
+    setFetchMsg('')
+    try {
+      const fd = new FormData()
+      fd.append('image', file)
+      const res = await fetch('/api/extract-from-image', { method: 'POST', body: fd })
+      const data = await res.json()
+      if (data.error) {
+        setFetchMsg(`Could not read screenshot: ${data.error}. Fill in manually.`)
+        setStep('form')
+        return
+      }
+      setForm(prev => ({
+        ...prev,
+        address: data.address ?? prev.address,
+        price: data.price ?? prev.price,
+        beds: data.beds ?? prev.beds,
+        baths: data.baths ?? prev.baths,
+        sqft: data.sqft ?? prev.sqft,
+        dom: data.dom ?? prev.dom,
+        annual_rev: data.annual_rev ?? prev.annual_rev,
+      }))
+      setFetchMsg('Extracted from screenshot! Review the fields below.')
+    } catch {
+      setFetchMsg("Couldn't read the screenshot — fill in manually.")
     } finally {
       setFetching(false)
       setStep('form')
@@ -90,24 +123,86 @@ export default function AddPropertyModal({ onClose, onAdd }: Props) {
 
         {step === 'url' && (
           <div>
-            <Label>Zillow URL (optional)</Label>
-            <p style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: 10 }}>
-              Paste a Zillow listing URL to auto-fill details, or skip straight to the form.
-            </p>
-            <input
-              type="url"
-              placeholder="https://www.zillow.com/homedetails/..."
-              value={zillowUrl}
-              onChange={e => setZillowUrl(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && fetchZillow()}
-              style={INPUT_STYLE}
-            />
-            <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-              <Btn onClick={fetchZillow} disabled={fetching} primary>
-                {fetching ? 'Fetching…' : 'Fetch from Zillow'}
-              </Btn>
-              <Btn onClick={skipToForm}>Fill in manually</Btn>
+            {/* Mode toggle */}
+            <div style={{ display: 'flex', gap: 0, marginBottom: 16, border: '1px solid rgba(148,163,184,0.2)', borderRadius: 10, overflow: 'hidden' }}>
+              {(['zillow', 'screenshot'] as const).map(mode => (
+                <button
+                  key={mode}
+                  onClick={() => setInputMode(mode)}
+                  style={{
+                    flex: 1, padding: '8px 0', fontSize: '0.8rem', fontWeight: 600,
+                    border: 'none', cursor: 'pointer',
+                    background: inputMode === mode ? '#1d4ed8' : 'transparent',
+                    color: inputMode === mode ? '#fff' : '#64748b',
+                  }}
+                >
+                  {mode === 'zillow' ? '🔗 Zillow URL' : '📷 Screenshot'}
+                </button>
+              ))}
             </div>
+
+            {inputMode === 'zillow' && (
+              <>
+                <p style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: 10 }}>
+                  Paste a Zillow listing URL to auto-fill details.
+                </p>
+                <input
+                  type="url"
+                  placeholder="https://www.zillow.com/homedetails/..."
+                  value={zillowUrl}
+                  onChange={e => setZillowUrl(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && fetchZillow()}
+                  style={INPUT_STYLE}
+                />
+                <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+                  <Btn onClick={fetchZillow} disabled={fetching} primary>
+                    {fetching ? 'Fetching…' : 'Fetch from Zillow'}
+                  </Btn>
+                  <Btn onClick={skipToForm}>Fill in manually</Btn>
+                </div>
+              </>
+            )}
+
+            {inputMode === 'screenshot' && (
+              <>
+                <p style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: 10 }}>
+                  Upload a screenshot of any listing (Zillow, Redfin, AirDNA, Airbnb, etc.) and AI will extract the details.
+                </p>
+                <label
+                  style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'center',
+                    justifyContent: 'center', gap: 8,
+                    border: '2px dashed rgba(148,163,184,0.3)', borderRadius: 12,
+                    padding: '28px 20px', cursor: fetching ? 'not-allowed' : 'pointer',
+                    background: 'rgba(15,23,42,0.4)', color: '#64748b',
+                    fontSize: '0.82rem', textAlign: 'center',
+                  }}
+                >
+                  {fetching ? (
+                    <span style={{ color: '#a5b4fc' }}>Reading screenshot…</span>
+                  ) : (
+                    <>
+                      <span style={{ fontSize: '2rem' }}>📎</span>
+                      <span>Click to choose a screenshot</span>
+                      <span style={{ fontSize: '0.72rem', color: '#475569' }}>PNG, JPG, WEBP</span>
+                    </>
+                  )}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    disabled={fetching}
+                    style={{ display: 'none' }}
+                    onChange={e => {
+                      const file = e.target.files?.[0]
+                      if (file) extractFromScreenshot(file)
+                    }}
+                  />
+                </label>
+                <div style={{ marginTop: 14 }}>
+                  <Btn onClick={skipToForm}>Skip — fill in manually</Btn>
+                </div>
+              </>
+            )}
           </div>
         )}
 
